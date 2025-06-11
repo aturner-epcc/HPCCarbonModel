@@ -1,0 +1,502 @@
+#!/usr/bin/env python3
+
+##################################################
+# Tool for computing emissions from a defined HPC
+# system model and service period definitions
+##################################################
+
+# TODO: Rather than just efficiency, we need some
+#  scale of "research output" per AU to be able to
+#  compare different hardware options
+
+##################################################
+# Functions for computing resource allocations
+##################################################
+
+def getResourceAllocation(systemModel):
+
+    # Loop over components in the system, finding allocation unit
+    foundAllocation = False
+    resourceAllocation = {}
+    for name, component in systemModel['system']['components'].items():
+        if "AUComponent" in component:
+            if foundAllocation:
+                print("Error: only one component can be used for resource allocation")
+                sys.exit(1)
+            foundAllocation = True
+            resourceAllocation["name"] = name
+            resourceAllocation["AUPerComponent"] = component["AUPerComponent"]
+            resourceAllocation["AU"] = component["AU"]
+            resourceAllocation['AUPerHour'] = component["count"] * component["AUPerComponent"]
+
+    # Test that we did find an allocation component here
+    if not foundAllocation:
+        print("Error: no AU component defined")
+        sys.exit(1)
+
+    # Return the dict with allocation details
+    return resourceAllocation
+
+##################################################
+# Functions for saving system details
+##################################################
+
+def saveComponentDetails(systemModel):
+
+    components_d = {}
+    for name, component in systemModel['system']['components'].items():
+        temp_d = {}
+        temp_d['description'] = component['description']
+        temp_d['unit'] = component['unit']
+        temp_d['scope3PerUnit'] = component['scope3PerUnit']
+        temp_d['kWPerUnitIdle'] = component['kWPerUnitIdle']
+        temp_d['kWPerUnitLoaded'] = component['kWPerUnitLoaded']
+        components_d[name] = temp_d
+
+    return components_d
+
+
+##################################################
+# Functions for computing emissions
+##################################################
+
+def computeScope3Total(systemModel):
+
+    # Loop over components in the system, accumulating emissions
+    scope3Total = 0.0
+    for name, component in systemModel['system']['components'].items():
+        totalEmissions = component['count'] * component['scope3PerUnit']
+        scope3Total += totalEmissions
+
+    return scope3Total
+
+def computePeriodEmissions(periodName, systemModel, modelOutput):
+
+    period_d = systemModel['system']['operationPeriods'][periodName]
+
+    # Dict to hold the period results
+    periodDefinition_d = {}
+
+    # Scope 2 emissions in the period
+    scope2PeriodEmissions = computeScope2Period(systemModel, period_d)
+
+    periodDefinition_d['lengthDays'] = scope2PeriodEmissions['lengthDays']
+    periodDefinition_d['lengthHours'] = scope2PeriodEmissions['lengthHours']
+    periodDefinition_d['power'] = scope2PeriodEmissions['power']
+    periodDefinition_d['energy'] = scope2PeriodEmissions['energy']
+    periodDefinition_d['load'] = period_d['load']
+
+    # Resource definitions
+    resourcePerHour = modelOutput['resourceAllocation']['AUPerHour']
+    totalResource = modelOutput['serviceTotals']['totalAU']
+
+    periodDefinition_d['AU'] = periodDefinition_d['lengthHours'] * resourcePerHour
+
+    # Add the components
+    periodDefinition_d['components'] = scope2PeriodEmissions['components']
+    
+    # Scope 3 emissions in the period
+    # Compute scope 3 per resource unit
+    scope3Total = modelOutput['serviceTotals']['emissionsScope3']
+    scope3PerAllocationUnit = scope3Total / totalResource
+    # Compute scope 3
+    scope3PeriodEmissions = computeScope3Period(systemModel, period_d, resourcePerHour, scope3PerAllocationUnit)
+
+    periodEmissions_d = {}
+    periodEmissions_d['carbonIntensity'] = period_d['carbonIntensity']
+    periodEmissions_d['scope2'] = scope2PeriodEmissions['totalEmissions']
+    periodEmissions_d['scope2PerkWh'] = scope2PeriodEmissions['totalEmissionsPerkWh']
+    periodEmissions_d['scope2PerAU'] = scope2PeriodEmissions['totalEmissions'] / periodDefinition_d['AU']
+    periodEmissions_d['scope2Effective'] = periodEmissions_d['scope2PerAU'] / periodDefinition_d['load']
+    periodEmissions_d['scope3'] = scope3PeriodEmissions['totalEmissions']
+    periodEmissions_d['scope3PerAU'] = scope3PeriodEmissions['totalEmissions'] / periodDefinition_d['AU']
+    periodEmissions_d['scope3Effective'] = periodEmissions_d['scope3PerAU'] / periodDefinition_d['load']
+    periodEmissions_d['total'] = periodEmissions_d['scope2'] + periodEmissions_d['scope3']
+    periodEmissions_d['totalPerAU'] = periodEmissions_d['scope2PerAU'] + periodEmissions_d['scope3PerAU']
+    periodEmissions_d['totalEffective'] = periodEmissions_d['totalPerAU'] / periodDefinition_d['load']
+
+    periodDefinition_d['emissions'] = periodEmissions_d
+
+    return periodDefinition_d
+    
+def computeScope3Period(systemModel, periodDef, resourcePerHour, scope3PerAllocationUnit):
+
+    periodHours = periodDef['periodLength'] * 24
+    scope3TotalEmissions = periodHours * resourcePerHour * scope3PerAllocationUnit
+
+    scope3Details = {}
+    scope3Details['lengthDays'] = periodDef['periodLength']
+    scope3Details['lengthHours'] = periodHours
+    scope3Details['totalEmissions'] = scope3TotalEmissions
+
+    return scope3Details
+
+def computeScope2Period(systemModel, periodDef):
+
+    # Definitions from the periods
+    periodHours = periodDef['periodLength'] * 24
+    periodLoad = periodDef['load']
+    carbonIntensity = periodDef['carbonIntensity']
+
+    # Loop over components in the system, accumulating power draw, energy use and emissions
+    scope2Details = {}
+    scope2ComponentDetails = {}
+    totalPower = 0.0
+    totalEnergy = 0.0
+    scope2TotalEmissionsPerkWh = 0.0
+    scope2TotalEmissions = 0.0
+    for name, component in systemModel['system']['components'].items():
+        loadedPower = component['count'] * component['kWPerUnitLoaded']
+        idlePower = component['count'] * component['kWPerUnitIdle']
+        loadedEmissions = loadedPower * carbonIntensity
+        idleEmissions = idlePower * carbonIntensity
+        componentTotalPower = periodLoad * loadedPower + (1.0-periodLoad) * idlePower
+        componentTotalEnergy = componentTotalPower * periodHours
+        componentTotalEmissionsPerkWh = periodLoad * loadedEmissions + (1.0-periodLoad) * idleEmissions
+        componentTotalEmissions = componentTotalEmissionsPerkWh * periodHours
+        totalPower += componentTotalPower
+        totalEnergy += componentTotalEnergy
+        scope2TotalEmissionsPerkWh += componentTotalEmissionsPerkWh
+        scope2TotalEmissions += componentTotalEmissions
+
+        scope2Dict = {}
+        scope2Dict['power'] = componentTotalPower
+        scope2Dict['energy'] = componentTotalEnergy
+        scope2Dict['emissionsScope2PerkWh'] = componentTotalEmissionsPerkWh
+        scope2Dict['emissionsScope2'] = componentTotalEmissions
+
+        # Save this set of emissions
+        scope2ComponentDetails[name] = scope2Dict
+
+    # Return the dict with emissions
+    scope2Details['lengthDays'] = periodDef['periodLength']
+    scope2Details['lengthHours'] = periodHours
+    scope2Details['power'] = totalPower
+    scope2Details['energy'] = totalEnergy
+    scope2Details['carbonIntensity'] = carbonIntensity
+    scope2Details['totalEmissionsPerkWh'] = scope2TotalEmissionsPerkWh
+    scope2Details['totalEmissions'] = scope2TotalEmissions
+    scope2Details['components'] = scope2ComponentDetails
+    return scope2Details
+
+##################################################
+# Functions for computing efficiencies
+##################################################
+
+def computePeriodEfficiency(name, systemModel, modelOutput):
+
+    systemPeriod_d = systemModel['system']['operationPeriods'][name]
+    outputPeriod_d = modelOutput['operationalPeriods'][name]
+
+    # Resource definitions
+    resourcePerHour = modelOutput['resourceAllocation']['AUPerHour']
+    totalResource = modelOutput['serviceTotals']['totalAU']
+
+    # Compute total amount of resource in this period
+    periodResource = outputPeriod_d['lengthHours'] * resourcePerHour
+
+    efficiency_d = {}
+
+    efficiency_d['efficiency'] = systemPeriod_d['efficiency']
+
+    resourceUsed = periodResource * outputPeriod_d['load']
+    resourceIdle = periodResource - resourceUsed
+    efficiency_d['AUActive'] = resourceUsed
+    efficiency_d['AUIdle'] = resourceIdle
+
+    # Used/idle emissions in this period
+    efficiency_d['scope2Active'] = resourceUsed * outputPeriod_d['emissions']['scope2PerAU']
+    efficiency_d['scope3Active'] = resourceUsed * outputPeriod_d['emissions']['scope3PerAU']
+    efficiency_d['emissionsActive'] = resourceUsed * outputPeriod_d['emissions']['totalPerAU']
+    efficiency_d['scope2Idle'] = resourceIdle * outputPeriod_d['emissions']['scope2PerAU']
+    efficiency_d['scope3Idle'] = resourceIdle * outputPeriod_d['emissions']['scope3PerAU']
+    efficiency_d['emissionsIdle'] = resourceIdle * outputPeriod_d['emissions']['totalPerAU']
+
+    efficiency_d['output'] = resourceUsed * efficiency_d['efficiency']
+
+    periodEnergyPerResource =  outputPeriod_d['energy'] / periodResource
+    efficiency_d['energyPerAU'] = periodEnergyPerResource
+
+    outputPerEnergy = systemPeriod_d['efficiency'] * outputPeriod_d['load'] * periodResource / outputPeriod_d['energy']
+    efficiency_d['outputPerEnergy'] = outputPerEnergy
+
+    if outputPeriod_d['emissions']['scope2'] > 0.0:
+        outputPerScope2Emissions = systemPeriod_d['efficiency'] * outputPeriod_d['load'] * periodResource / outputPeriod_d['emissions']['scope2']
+        efficiency_d['scope2EmissionsPerOutput'] = 1.0 / outputPerScope2Emissions
+    else:
+        efficiency_d['scope2EmissionsPerOutput'] = 0.0
+
+    if outputPeriod_d['emissions']['scope3'] > 0.0:
+        outputPerScope3Emissions = systemPeriod_d['efficiency'] * outputPeriod_d['load'] * periodResource / outputPeriod_d['emissions']['scope3']
+        efficiency_d['scope3EmissionsPerOutput'] = 1.0 / outputPerScope3Emissions
+    else:
+        efficiency_d['scope3EmissionsPerOutput'] = 0.0
+
+    if outputPeriod_d['emissions']['total'] > 0.0:
+        outputPerEmissions = systemPeriod_d['efficiency'] * outputPeriod_d['load'] * periodResource / outputPeriod_d['emissions']['total']
+        efficiency_d['emissionsPerOutput'] = 1.0 / outputPerEmissions
+    else:
+        efficiency_d['emissionsPerOutput'] = 0.0
+
+    return efficiency_d
+
+
+##################################################
+# Functions for reading definition files
+##################################################
+
+def readSystemModelJSON(jsonFile):
+    import json
+
+    # Need to add error checking
+    f = open(jsonFile)
+    systemModel = json.load(f)
+
+    return systemModel
+
+def readSystemModelYAML(jsonFile):
+    import yaml
+
+    # Need to add error checking
+    f = open(jsonFile)
+    systemModel = yaml.load(f, Loader=yaml.FullLoader)
+
+    return systemModel
+
+def readPeriodDefinitionsYAML(jsonFile):
+    import yaml
+
+    # Need to add error checking
+    f = open(jsonFile)
+    periodDefs = yaml.load(f, Loader=yaml.FullLoader)
+
+    return periodDefs
+
+##################################################
+# Functions for computing totals
+##################################################
+
+def computeTotalResource(systemModel, resourceAllocation):
+
+    # Resource definitions
+    resourcePerHour = resourceAllocation['AUPerHour']
+
+    # We get the total resource based on the specified service length
+    #  NB: this does not need to match the sum of the period lengths
+    totalResource = 24 * systemModel['system']['lifetime'] * resourcePerHour
+    
+    return totalResource
+
+def initialiseTotals():
+
+    total_d = {}
+    total_d["lengthDays"] = 0
+    total_d["lengthHours"] = 0
+    total_d["AU"] = 0
+    total_d["AUActive"] = 0.0
+    total_d["AUIdle"] = 0.0
+    total_d['output'] = 0.0
+    total_d["energy"] = 0.0
+    total_d["emissionsScope2"] = 0.0
+    total_d["emissionsScope3"] = 0.0
+    total_d["emissions"] = 0.0
+    total_d["emissionsScope2Active"] = 0.0
+    total_d["emissionsScope3Active"] = 0.0
+    total_d["emissionsActive"] = 0.0
+    total_d["emissionsScope2Idle"] = 0.0
+    total_d["emissionsScope3Idle"] = 0.0
+    total_d["emissionsIdle"] = 0.0
+
+    return total_d
+
+def updateTotalsPeriod(period_d, total_d):
+
+    new_total_d = {}
+    new_total_d["AU"] = total_d["AU"] + period_d["AU"]
+    new_total_d["lengthDays"] = total_d["lengthDays"] + period_d["lengthDays"]
+    new_total_d["lengthHours"] = total_d["lengthHours"] + period_d["lengthHours"]
+    new_total_d["AUActive"] = total_d["AUActive"] + period_d["efficiency"]["AUActive"]
+    new_total_d["AUIdle"] = total_d["AUIdle"] + period_d["efficiency"]["AUIdle"]
+    new_total_d["output"] = total_d["output"] + period_d["efficiency"]["output"]
+    new_total_d["load"] = new_total_d["AUActive"] / new_total_d["AU"]
+    new_total_d["energy"] = total_d["energy"] + period_d["energy"]
+    new_total_d["emissionsScope2"] = total_d["emissionsScope2"] + period_d["emissions"]["scope2"]
+    new_total_d["emissionsScope3"] = total_d["emissionsScope3"] + period_d["emissions"]["scope3"]
+    new_total_d["emissions"] = total_d["emissions"] + period_d["emissions"]["total"]
+
+    new_total_d["emissionsScope2Active"] = total_d["emissionsScope2Active"] + period_d["efficiency"]["scope2Active"]
+    new_total_d["emissionsScope3Active"] = total_d["emissionsScope3Active"] + period_d["efficiency"]["scope3Active"]
+    new_total_d["emissionsActive"] = total_d["emissionsActive"] + period_d["efficiency"]["emissionsActive"]
+    new_total_d["emissionsScope2Idle"] = total_d["emissionsScope2Idle"] + period_d["efficiency"]["scope2Idle"]
+    new_total_d["emissionsScope3Idle"] = total_d["emissionsScope3Idle"] + period_d["efficiency"]["scope3Idle"]
+    new_total_d["emissionsIdle"] = total_d["emissionsIdle"] + period_d["efficiency"]["emissionsIdle"]
+    
+    return new_total_d
+
+##################################################
+# Functions for writing results
+##################################################
+
+def printResultsTerminal(systemModel, modelOutput):
+
+    print(f"\n{modelOutput['name']}")
+
+    totDays = modelOutput['serviceTotals']['lengthDays']
+    totScope2 = modelOutput['serviceTotals']['emissionsScope2']
+    totScope3 = modelOutput['serviceTotals']['emissionsScope3']
+    totEmissions = modelOutput['serviceTotals']['emissions']
+    totEnergy = modelOutput['serviceTotals']['energy']
+    totAUActive = modelOutput['serviceTotals']['AUActive']
+    totAUIdle = modelOutput['serviceTotals']['AUIdle']
+    totLoad = modelOutput['serviceTotals']['load']
+    totOutput = modelOutput['serviceTotals']['output']
+
+    # Component summary
+    print(f"\nArchitecture\n")
+    print(f"|{'Component':>20s} |{'Count':>10s} |{'Unit':>10s} |{'Idle Power (kW)':>18s} |{'Loaded Power (kW)':>18s} |")
+    print(f"|{'-'*21}|{'-'*11}|{'-'*11}|{'-'*19}|{'-'*19}|")
+    totalLoadedPower = 0.0
+    totalIdlePower = 0.0
+    for name, component in systemModel['system']['components'].items():
+        componentPower = component['kWPerUnitLoaded']*component['count']
+        componentIdlePower = component['kWPerUnitIdle']*component['count']
+        totalLoadedPower += componentPower
+        totalIdlePower += componentIdlePower
+        print(f"|{name:>20s} |{component['count']:>10d} |{component['unit']:>10s} |{componentIdlePower:>18.3f} |{componentPower:>18.3f} |")
+    print(f"|{'Total':>20s} |{' ':>10s} |{' ':>10s} |{totalIdlePower:>18.3f} |{totalLoadedPower:>18.3f} |")
+
+    # Total statistics
+    print(f"\nSum over all defined periods\n")
+    print(f"\n{'   Total length = ':>20s}{totDays} days")
+    print(f"{'Scope 2 emissions = ':>20s}{totScope2:.0f} kgCO2e ({100*totScope2/totEmissions:.2f}%)")
+    print(f"{'Scope 3 emissions = ':>20s}{totScope3:.0f} kgCO2e ({100*totScope3/totEmissions:.2f}%)")
+    print(f"{'  Total emissions = ':>20s}{totEmissions:.0f} kgCO2e\n")
+
+    # Period load summary
+    #   Period, length, AU, output, energy
+    allocUnit = modelOutput['resourceAllocation']['AU']
+    allocActive = f"{allocUnit} active"
+    allocIdle = f"{allocUnit} idle"
+    print(f"\nLoad by period\n")
+    print(f"|{'Period':>30s} |{'Load':>14s} |{allocActive:>11s} |{allocIdle:>11s} |{'Output':>10s} |{'Energy (kWh)':>13s} |")
+    print(f"|{'-'*31}|{'-'*15}|{'-'*12}|{'-'*12}|{'-'*11}|{'-'*14}|")
+    for name, period_d in modelOutput['operationalPeriods'].items():
+        load = period_d['load']
+        au = period_d['efficiency']['AUActive']
+        auidle = period_d['efficiency']['AUIdle']
+        output = period_d['efficiency']['output']
+        energy = period_d['energy']
+        print(f"|{name:>30s} |{load:>14.2f} |{au:>11.0f} |{auidle:>11.0f} |{output:>10.0f} |{energy:>13.0f} |")
+    print(f"|{'Total':>30s} |{totLoad:>14.2f} |{totAUActive:>11.0f} |{totAUIdle:>11.0f} |{totOutput:>10.0f} |{totEnergy:>13.0f} |")
+
+    # Period emissions summary
+    #   Period, length, scope 2 emissions, scope 3 emissions, total emissions
+    print(f"\nEmissions by period (emissions in kgCO2e)\n")
+    print(f"|{'Period':>30s} |{'Length (days)':>14s} |{'Scope 2':>10s} |{'Scope 3':>10s} |{'Total':>10s} |")
+    print(f"|{'-'*31}|{'-'*15}|{'-'*11}|{'-'*11}|{'-'*11}|")
+    for name, period_d in modelOutput['operationalPeriods'].items():
+        length = period_d['lengthDays']
+        scope2 = period_d['emissions']['scope2']
+        scope3 = period_d['emissions']['scope3']
+        total = period_d['emissions']['total']
+        scope2Active = period_d['efficiency']['scope2Active']
+        scope3Active = period_d['efficiency']['scope3Active']
+        totalActive = period_d['efficiency']['emissionsActive']
+        scope2Idle = period_d['efficiency']['scope2Idle']
+        scope3Idle = period_d['efficiency']['scope3Idle']
+        totalIdle = period_d['efficiency']['emissionsIdle']
+        print(f"| {name:29s} |{length:>14d} |{scope2:>10.0f} |{scope3:>10.0f} |{total:>10.0f} |")
+        print(f"|{'Active':>30s} |{' ':>14s} |{scope2Active:>10.0f} |{scope3Active:>10.0f} |{totalActive:>10.0f} |")
+        print(f"|{'Idle':>30s} |{' ':>14s} |{scope2Idle:>10.0f} |{scope3Idle:>10.0f} |{totalIdle:>10.0f} |")
+
+    # Period emissions rates
+    #   Period, length, scope 2 emission rate, scope 3 emission rate, total emissions rate
+    allocUnit = modelOutput['resourceAllocation']['AU']
+    print(f"\nRaw emission rates by period (emissions in kgCO2e/{allocUnit})\n")
+    print(f"|{'Period':>30s} |{'Length (days)':>14s} |{'Scope 2':>10s} |{'Scope 3':>10s} |{'Total':>10s} |")
+    print(f"|{'-'*31}|{'-'*15}|{'-'*11}|{'-'*11}|{'-'*11}|")
+    for name, period_d in modelOutput['operationalPeriods'].items():
+        length = period_d['lengthDays']
+        scope2 = period_d['emissions']['scope2PerAU']
+        scope3 = period_d['emissions']['scope3PerAU']
+        total = period_d['emissions']['totalPerAU']
+        print(f"|{name:>30s} |{length:>14d} |{scope2:>10.6f} |{scope3:>10.6f} |{total:>10.6f} |")
+
+    # Period effective emissions rates
+    #   Period, load, scope 2 emission rate, scope 3 emission rate, total emissions rate
+    allocUnit = modelOutput['resourceAllocation']['AU']
+    print(f"\nEffective emission rates by period (emissions in kgCO2e/{allocUnit})\n")
+    print(f"|{'Period':>30s} |{'Load':>14s} |{'Scope 2':>10s} |{'Scope 3':>10s} |{'Total':>10s} |")
+    print(f"|{'-'*31}|{'-'*15}|{'-'*11}|{'-'*11}|{'-'*11}|")
+    for name, period_d in modelOutput['operationalPeriods'].items():
+        load = period_d['load']
+        scope2 = period_d['emissions']['scope2Effective']
+        scope3 = period_d['emissions']['scope3Effective']
+        total = period_d['emissions']['totalEffective']
+        print(f"|{name:>30s} |{load:>14.2f} |{scope2:>10.6f} |{scope3:>10.6f} |{total:>10.6f} |")
+
+    # Period efficiencies
+    #   Period, load, efficiency, output, scope 2 rate, scope 3 rate, total rate
+    allocUnit = modelOutput['resourceAllocation']['AU']
+    print(f"\nEfficiency emission rates by period (emissions in kgCO2e/output)\n")
+    print(f"|{'Period':>30s} |{'Load':>14s} |{'Efficiency':>14s} |{'Scope 2':>10s} |{'Scope 3':>10s} |{'Total':>10s} |")
+    print(f"|{'-'*31}|{'-'*15}|{'-'*15}|{'-'*11}|{'-'*11}|{'-'*11}|")
+    for name, period_d in modelOutput['operationalPeriods'].items():
+        load = period_d['load']
+        efficiency = period_d['efficiency']['efficiency']
+        scope2 = period_d['efficiency']['scope2EmissionsPerOutput']
+        scope3 = period_d['efficiency']['scope3EmissionsPerOutput']
+        total = period_d['efficiency']['emissionsPerOutput']
+        print(f"|{name:>30s} |{load:>14.2f} |{efficiency:>14.2f} |{scope2:>10.6f} |{scope3:>10.6f} |{total:>10.6f} |")
+
+    print()
+
+##################################################
+# Main function
+##################################################
+
+if __name__ == "__main__":
+    import sys
+    import json
+
+    # Read the system definition
+    systemModel = readSystemModelYAML(sys.argv[1])
+    periodDefs = readPeriodDefinitionsYAML(sys.argv[2])
+    systemModel['system']['operationPeriods'] = periodDefs
+
+    # Prepare the results data structure
+    modelOutput = {}
+    modelOutput['name'] = systemModel['system']['name']
+    modelOutput['components'] = saveComponentDetails(systemModel)
+
+    # Get resource component definition
+    modelOutput['resourceAllocation'] = {}
+    resourceAllocation_d = getResourceAllocation(systemModel)
+    modelOutput['resourceAllocation'] = resourceAllocation_d
+
+    # Compute totals that are required for other calculations
+    modelOutput['serviceTotals'] = {}
+    modelOutput['serviceTotals']['emissionsScope3'] = computeScope3Total(systemModel)
+    modelOutput['serviceTotals']['totalAU'] = computeTotalResource(systemModel, modelOutput['resourceAllocation'] )
+
+    # Initialise the totals dict
+    total_d = initialiseTotals()
+
+    # Loop over defined operation periods getting emissions and efficiencies
+    modelOutput['operationalPeriods'] = {}
+    for name, period in systemModel['system']['operationPeriods'].items():
+        period_d = computePeriodEmissions(name, systemModel, modelOutput)
+        modelOutput['operationalPeriods'][name] = period_d
+        efficiency_d = computePeriodEfficiency(name, systemModel, modelOutput)
+        modelOutput['operationalPeriods'][name]['efficiency'] = efficiency_d
+        total_d = updateTotalsPeriod(modelOutput['operationalPeriods'][name], total_d)
+
+
+    # Add the totals to the results dict
+    modelOutput['serviceTotals'] = total_d
+
+    # Write the output to the terminal
+    printResultsTerminal(systemModel, modelOutput)
+    
+
+

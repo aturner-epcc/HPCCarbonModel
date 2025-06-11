@@ -1,0 +1,30 @@
+"2021":
+    periodLength: 365
+    load: 0.75
+    carbonIntensity: 0.024
+    efficiency: 0.9
+"2022":
+    periodLength: 365
+    load: 0.89
+    carbonIntensity: 0.057
+    efficiency: 0.9
+"2023":
+    periodLength: 365
+    load: 0.93
+    carbonIntensity: 0.049
+    efficiency: 0.9
+"2024":
+    periodLength: 365
+    load: 0.93
+    carbonIntensity: 0.022
+    efficiency: 0.9
+"2025":
+    periodLength: 365
+    load: 0.93
+    carbonIntensity: 0.019
+    efficiency: 0.9
+"2026":
+    periodLength: 365
+    load: 0.93
+    carbonIntensity: 0.016
+    efficiency: 0.9

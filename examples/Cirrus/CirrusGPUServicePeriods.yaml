@@ -1,0 +1,6 @@
+Service Lifetime:
+    periodLength: 1825
+    load: 0.6
+    carbonIntensity: 0.024
+    efficiency: 0.75
+

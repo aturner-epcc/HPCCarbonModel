@@ -1,0 +1,50 @@
+
+system:
+    name: ARCHER2 full frequency
+    lifetime: 2190
+    components:
+        CPU compute node:
+            description: ARCHER2 CPU compute node
+            count: 5860
+            unit: nodes
+            scope3PerUnit: 1100
+            kWPerUnitLoaded: 0.400
+            kWPerUnitIdle: 0.220
+            AUComponent: true
+            AUPerComponent: 1
+            AU: nodeh
+        Interconnect switch:
+            description: ARCHER2 Slingshot switch
+            count: 768
+            unit: switches
+            scope3PerUnit: 250
+            kWPerUnitLoaded: 0.250
+            kWPerUnitIdle: 0.250
+        Lustre storage (HDD):
+            description: ARCHER2 Lustre Storage (HDD)
+            count: 19759200
+            unit: GB
+            scope3PerUnit: 0.02
+            kWPerUnitLoaded: 0.0000016
+            kWPerUnitIdle: 0.0000016
+        Lustre storage (SSD):
+            description: ARCHER2 Lustre Storage (SSD)
+            count: 1900800
+            unit: GB
+            scope3PerUnit: 0.16
+            kWPerUnitLoaded: 0.0000042
+            kWPerUnitIdle: 0.0000042
+        NFS storage:
+            description: ARCHER2 NFS Storage
+            count: 3240000
+            unit: GB
+            scope3PerUnit: 0.02
+            kWPerUnitLoaded: 0.0000049
+            kWPerUnitIdle: 0.0000049
+        CDU:
+            description: ARCHER2 Coolant Distribution Units
+            count: 6
+            unit: CDU
+            scope3PerUnit: 0.0
+            kWPerUnitLoaded: 16.0
+            kWPerUnitIdle: 16.0
